@@ -34,3 +34,44 @@ export const calculateEAR = (eyePoints, width, height) => {
     // Return the final ratio 
     return (vertical1 + vertical2) / (2.0 * horizontal);
 };
+/**
+ * Calculates the Head Turn Ratio (Yaw) to detect if the user is looking away.
+ * @param {Array} landmarks - The full array of 468 MediaPipe face landmarks
+ * @param {number} width - Video frame width
+ * @param {number} height - Video frame height
+ * @returns {string} - Returns 'STRAIGHT', 'LEFT', or 'RIGHT'
+ */
+export const detectHeadTurn = (landmarks, width, height) => {
+    // Helper function to calculate the distance between two 2D points
+    const getDistance = (p1, p2) => {
+        const x1 = p1.x * width, y1 = p1.y * height;
+        const x2 = p2.x * width, y2 = p2.y * height;
+        return Math.hypot(x1 - x2, y1 - y2);
+    };
+
+    // 1. Extract the specific landmarks for head pose tracking
+    const noseTip = landmarks[1];
+    const leftFaceEdge = landmarks[234];
+    const rightFaceEdge = landmarks[454];
+
+    // 2. Calculate distances from the nose tip to the edges of the face
+    const leftDistance = getDistance(noseTip, leftFaceEdge);
+    const rightDistance = getDistance(noseTip, rightFaceEdge);
+
+    // Prevent division by zero if the tracking glitches
+    if (rightDistance === 0) return 'STRAIGHT';
+
+    // 3. Calculate the Yaw Ratio
+    const turnRatio = leftDistance / rightDistance;
+
+    // 4. Determine head position based on the threshold
+    // Note: These thresholds (0.5 and 2.0) are standard baselines. 
+    // Shashwat can adjust these slightly in the UI if the camera angle requires it.
+    if (turnRatio < 0.5) {
+        return 'LEFT';
+    } else if (turnRatio > 2.0) {
+        return 'RIGHT';
+    } else {
+        return 'STRAIGHT';
+    }
+};
