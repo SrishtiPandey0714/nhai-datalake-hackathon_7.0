@@ -44,7 +44,7 @@ export function FaceRecognitionCamera() {
     // 3. LOAD THE AI MODEL
     // Loads our compressed model from the assets/models folder.
     const plugin = useTensorflowModel(
-        require('../../assets/models/facenet_edge_quantized.tflite'),
+        require('../../assets/models/efficientnet_quantized.tflite'), // <-- revised exact filename
         delegateType
     );
     const model = plugin.model;
