@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Gradle/Build outputs
+android/.gradle/
+android/build/
+android/app/build/
+
+# Android build packages
+*.apk
+*.aab
+
+# IDE configurations
+.idea/
+.vscode/
+
+# Local/secrets configurations
+local.properties
