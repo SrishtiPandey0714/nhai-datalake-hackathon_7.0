@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import {
   StyleSheet,
   Text,
@@ -6,31 +6,15 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   StatusBar,
+  Dimensions,
 } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission, useFrameProcessor, VisionCameraProxy } from 'react-native-vision-camera';
-import { Worklets } from 'react-native-worklets-core';
+import { Camera, useCameraDevice, useCameraPermission, useFrameProcessor } from 'react-native-vision-camera';
+import { Worklets, useSharedValue } from 'react-native-worklets-core';
+import { useFaceDetector } from 'react-native-vision-camera-face-detector';
 import { LIVENESS_CONSTANTS } from '../constants/liveness';
-import { calculateEAR, detectHeadTurn } from '../../livenessMath';
+import { calculateEAR } from '../utils/livenessMath';
 
-// File-level frame counter to throttle execution safely in the worklet thread
-let frameCounter = 0;
-
-// Helper to determine if face is centered in the frame
-const isFaceCentered = (landmarks: any) => {
-  const nose = landmarks[LIVENESS_CONSTANTS.NOSE_TIP_POINT];
-  const leftEdge = landmarks[LIVENESS_CONSTANTS.LEFT_FACE_EDGE_POINT];
-  const rightEdge = landmarks[LIVENESS_CONSTANTS.RIGHT_FACE_EDGE_POINT];
-  if (!nose || !leftEdge || !rightEdge) return false;
-  
-  // Check if nose is in center box (normalized [0, 1])
-  const isNoseCentered = nose.x > 0.35 && nose.x < 0.65 && nose.y > 0.30 && nose.y < 0.70;
-  
-  // Verify face scale (distance between left/right edges must be at least 0.15)
-  const faceWidth = Math.abs(leftEdge.x - rightEdge.x);
-  const isScaleAdequate = faceWidth > 0.15;
-  
-  return isNoseCentered && isScaleAdequate;
-};
+const { width: windowWidth, height: windowHeight } = Dimensions.get('window');
 
 type LivenessState =
   | 'WAITING_FOR_FACE'
@@ -38,62 +22,62 @@ type LivenessState =
   | 'BLINK'
   | 'TURN_LEFT'
   | 'TURN_RIGHT'
-  | 'PASSED'
-  | 'FAILED';
+  | 'LIVENESS_PASSED'
+  | 'LIVENESS_FAILED';
 
 export const CameraScreen: React.FC = () => {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice(LIVENESS_CONSTANTS.DEFAULT_CAMERA_POSITION);
 
-  // Initialize frame processor plugin for MediaPipe Face Mesh
-  const plugin = useRef(VisionCameraProxy.initFrameProcessorPlugin('detectFaceMesh', {})).current;
+  // Persistent shared value for frame throttling inside the worklet
+  const frameCounter = useSharedValue(0);
 
-  // Liveness state machine states
-  const [livenessState, setLivenessState] = useState<LivenessState>('WAITING_FOR_FACE');
-  const [noFaceFrameCount, setNoFaceFrameCount] = useState(0);
-  const [showTelemetry, setShowTelemetry] = useState(false);
+  // Initialize third-party MLKit Face Detector plugin with screen-scaled autoMode
+  const faceDetector = useFaceDetector(useMemo(() => ({
+    performanceMode: 'fast',
+    landmarkMode: 'all',
+    contourMode: 'all',
+    classificationMode: 'all',
+    autoMode: true,
+    windowWidth: windowWidth,
+    windowHeight: windowHeight,
+  }), []));
 
-  // Live telemetry metrics
+  // Telemetry state variables
+  const [faceCount, setFaceCount] = useState(0);
+  const [contourCount, setContourCount] = useState(0);
   const [fps, setFps] = useState(0);
   const [liveEar, setLiveEar] = useState(0);
   const [liveYaw, setLiveYaw] = useState(0);
-  const [direction, setDirection] = useState<'STRAIGHT' | 'LEFT' | 'RIGHT'>('STRAIGHT');
+  const [leftOpenProb, setLeftOpenProb] = useState(0);
+  const [rightOpenProb, setRightOpenProb] = useState(0);
+  const [showTelemetry, setShowTelemetry] = useState(true);
 
-  // Histories for 5-frame smoothing (sliding window)
-  const earHistoryRef = useRef<number[]>([]);
-  const yawHistoryRef = useRef<number[]>([]);
-  const consecutiveMatchRef = useRef<number>(0);
-  const blinkSubStateRef = useRef<'LOOKING_FOR_CLOSED' | 'LOOKING_FOR_OPEN'>('LOOKING_FOR_CLOSED');
-  
-  // Performance and timers
-  const lastFrameTimeRef = useRef<number>(0);
-  const stateStartTimeRef = useRef<number>(0);
-  const currentLivenessStateRef = useRef<LivenessState>('WAITING_FOR_FACE');
+  // Liveness State Machine variables
+  const [livenessState, setLivenessState] = useState<LivenessState>('WAITING_FOR_FACE');
+  const livenessStateRef = useRef<LivenessState>('WAITING_FOR_FACE');
+  const stateStartedTime = useRef<number>(Date.now());
+  const consecutiveFramesCount = useRef<number>(0);
+  const isEyeClosed = useRef<boolean>(false);
+  const earHistory = useRef<number[]>([]);
 
-  // Sync state ref to avoid closure issues inside async worklet callback
-  useEffect(() => {
-    currentLivenessStateRef.current = livenessState;
-  }, [livenessState]);
-
-  // Start state timers on state change
-  useEffect(() => {
-    stateStartTimeRef.current = Date.now();
-    consecutiveMatchRef.current = 0;
-    blinkSubStateRef.current = 'LOOKING_FOR_CLOSED';
-  }, [livenessState]);
-
-  // Reset the liveness validation state machine
-  const resetLiveness = useCallback(() => {
-    earHistoryRef.current = [];
-    yawHistoryRef.current = [];
-    consecutiveMatchRef.current = 0;
-    blinkSubStateRef.current = 'LOOKING_FOR_CLOSED';
-    setLivenessState('WAITING_FOR_FACE');
-    setNoFaceFrameCount(0);
+  // State transition helper
+  const transitionToState = useCallback((newState: LivenessState) => {
+    livenessStateRef.current = newState;
+    setLivenessState(newState);
+    stateStartedTime.current = Date.now();
+    consecutiveFramesCount.current = 0;
+    isEyeClosed.current = false;
+    console.log(`[Liveness Machine] Transitioned to state: ${newState}`);
   }, []);
 
-  // Safe handler callback to update state from the frame processor thread
-  const processLandmarks = useCallback((landmarks: any) => {
+  // Performance timers
+  const lastFrameTimeRef = useRef<number>(0);
+
+  // Safe handler callback to update state and log coordinates on JS thread
+  const processLandmarks = useCallback((faces: any) => {
+    // console.log(`[JS Thread] processLandmarks called. Detected faces: ${faces?.length ?? 0}`);
+    
     // 1. Calculate FPS
     const now = Date.now();
     if (lastFrameTimeRef.current > 0) {
@@ -102,141 +86,165 @@ export const CameraScreen: React.FC = () => {
     }
     lastFrameTimeRef.current = now;
 
-    // 2. Handle No Face Detected cases
-    if (!landmarks) {
-      setNoFaceFrameCount(prev => {
-        const next = prev + 1;
-        // If face is lost for 5 consecutive frames, drop back to WAITING_FOR_FACE
-        if (next >= 5 &&
-            currentLivenessStateRef.current !== 'WAITING_FOR_FACE' &&
-            currentLivenessStateRef.current !== 'PASSED' &&
-            currentLivenessStateRef.current !== 'FAILED') {
-          setLivenessState('WAITING_FOR_FACE');
-        }
-        return next;
-      });
+    // No-face-detected state: reset back to WAITING_FOR_FACE immediately
+    if (!faces || faces.length === 0) {
+      setFaceCount(0);
+      setContourCount(0);
+      setLiveEar(0);
+      if (
+        livenessStateRef.current !== 'WAITING_FOR_FACE' &&
+        livenessStateRef.current !== 'LIVENESS_PASSED' &&
+        livenessStateRef.current !== 'LIVENESS_FAILED'
+      ) {
+        console.log('[Liveness Machine] Face lost, resetting to WAITING_FOR_FACE');
+        transitionToState('WAITING_FOR_FACE');
+      }
       return;
     }
-    setNoFaceFrameCount(0);
 
-    // 3. Extract eye landmarks and calculate EAR
-    const leftEye = LIVENESS_CONSTANTS.LEFT_EYE_POINTS.map(idx => landmarks[idx]);
-    const rightEye = LIVENESS_CONSTANTS.RIGHT_EYE_POINTS.map(idx => landmarks[idx]);
+    setFaceCount(faces.length);
+    const face = faces[0];
     
-    // We pass 1000, 1000 for coordinates scale (landmarks are normalized [0, 1])
-    const w = 1000;
-    const h = 1000;
-    
-    const leftEAR = calculateEAR(leftEye, w, h);
-    const rightEAR = calculateEAR(rightEye, w, h);
-    const avgEAR = (leftEAR + rightEAR) / 2.0;
+    // Set classification probabilities (0.0 to 1.0)
+    setLeftOpenProb(face.leftEyeOpenProbability ?? 0);
+    setRightOpenProb(face.rightEyeOpenProbability ?? 0);
 
-    // Smooth EAR using 5-frame sliding window
-    earHistoryRef.current.push(avgEAR);
-    if (earHistoryRef.current.length > LIVENESS_CONSTANTS.SMOOTHING_WINDOW_SIZE) {
-      earHistoryRef.current.shift();
-    }
-    const smoothedEAR = earHistoryRef.current.reduce((a, b) => a + b, 0) / earHistoryRef.current.length;
-    setLiveEar(smoothedEAR);
+    // Set raw Yaw Angle
+    const yaw = face.yawAngle ?? 0;
+    setLiveYaw(yaw);
 
-    // 4. Extract landmarks for head turn and calculate ratio/direction
-    const headTurnResult = detectHeadTurn(landmarks, w, h);
-    
-    // Smooth Yaw ratio using 5-frame sliding window
-    yawHistoryRef.current.push(headTurnResult.ratio);
-    if (yawHistoryRef.current.length > LIVENESS_CONSTANTS.SMOOTHING_WINDOW_SIZE) {
-      yawHistoryRef.current.shift();
-    }
-    const smoothedYawRatio = yawHistoryRef.current.reduce((a, b) => a + b, 0) / yawHistoryRef.current.length;
-    setLiveYaw(smoothedYawRatio);
+    const faceCenterX = face.bounds.x + face.bounds.width / 2.0;
+    // console.log(`[JS Thread] face.bounds: ${JSON.stringify(face.bounds)} | yaw: ${yaw.toFixed(2)} | faceCenterX: ${faceCenterX.toFixed(2)}`);
 
-    // Determine direction from smoothed yaw ratio
-    let smoothedDirection: 'STRAIGHT' | 'LEFT' | 'RIGHT' = 'STRAIGHT';
-    if (smoothedYawRatio < LIVENESS_CONSTANTS.YAW_LEFT_THRESHOLD) {
-      smoothedDirection = 'LEFT';
-    } else if (smoothedYawRatio > LIVENESS_CONSTANTS.YAW_RIGHT_THRESHOLD) {
-      smoothedDirection = 'RIGHT';
-    }
-    setDirection(smoothedDirection);
+    // Process face contours
+    const contours = face.contours;
+    if (contours) {
+      const leftEye = contours.LEFT_EYE;
+      const rightEye = contours.RIGHT_EYE;
 
-    // 5. State Machine Transition Logic
-    setLivenessState(currentState => {
-      if (currentState === 'PASSED' || currentState === 'FAILED') return currentState;
+      if (leftEye && rightEye && leftEye.length >= 14 && rightEye.length >= 14) {
+        setContourCount(leftEye.length);
 
-      // Reset on face lost
-      if (currentState === 'WAITING_FOR_FACE') {
-        if (isFaceCentered(landmarks)) {
-          return 'FACE_CENTERED';
+        // 6-point EAR selection based on verified indices: 0, 3, 5, 8, 11, 13
+        const leftPoints = [
+          leftEye[0], leftEye[3], leftEye[5],
+          leftEye[8], leftEye[11], leftEye[13]
+        ];
+        const rightPoints = [
+          rightEye[0], rightEye[3], rightEye[5],
+          rightEye[8], rightEye[11], rightEye[13]
+        ];
+
+        // MLKit coordinates are absolute pixel values, so we pass 1.0 for scale
+        const leftEar = calculateEAR(leftPoints, 1.0, 1.0);
+        const rightEar = calculateEAR(rightPoints, 1.0, 1.0);
+        const avgEar = (leftEar + rightEar) / 2.0;
+
+        // Apply 5-frame moving average smoothing
+        earHistory.current.push(avgEar);
+        if (earHistory.current.length > LIVENESS_CONSTANTS.SMOOTHING_WINDOW_SIZE) {
+          earHistory.current.shift();
         }
-        return 'WAITING_FOR_FACE';
+        const smoothedEar = earHistory.current.reduce((a, b) => a + b, 0) / earHistory.current.length;
+        setLiveEar(smoothedEar);
+        // console.log(`[Liveness Machine] EAR calculated: ${smoothedEar.toFixed(4)} | avgEar: ${avgEar.toFixed(4)} | state: ${livenessStateRef.current} | isEyeClosed: ${isEyeClosed.current}`);
+
+        // Face centering calculation (using screen coordinates from autoMode)
+        const faceCenterX = face.bounds.x + face.bounds.width / 2.0;
+        const faceCenterY = face.bounds.y + face.bounds.height / 2.0;
+        
+        // Face is centered if within horizontal margin (90px) and vertical margin (150px) of screen center, and yaw is low
+        const isCentered = 
+          Math.abs(yaw) < 25.0 && 
+          Math.abs(faceCenterX - windowWidth / 2.0) < 90.0 && 
+          Math.abs(faceCenterY - windowHeight / 2.0) < 150.0;
+
+        // Active State timeout check
+        if (
+          livenessStateRef.current !== 'WAITING_FOR_FACE' &&
+          livenessStateRef.current !== 'LIVENESS_PASSED' &&
+          livenessStateRef.current !== 'LIVENESS_FAILED'
+        ) {
+          const elapsed = Date.now() - stateStartedTime.current;
+          if (elapsed > LIVENESS_CONSTANTS.STATE_TIMEOUT_MS) {
+            console.log(`[Liveness Machine] Timeout in state: ${livenessStateRef.current}`);
+            transitionToState('LIVENESS_FAILED');
+            return;
+          }
+        }
+
+        // State Machine transitions
+        switch (livenessStateRef.current) {
+          case 'WAITING_FOR_FACE':
+            if (isCentered) {
+              consecutiveFramesCount.current += 1;
+              if (consecutiveFramesCount.current >= 3) {
+                transitionToState('FACE_CENTERED');
+              }
+            } else {
+              consecutiveFramesCount.current = 0;
+            }
+            break;
+
+          case 'FACE_CENTERED':
+            if (isCentered) {
+              consecutiveFramesCount.current += 1;
+              if (consecutiveFramesCount.current >= 5) {
+                transitionToState('BLINK');
+              }
+            } else {
+              transitionToState('WAITING_FOR_FACE');
+            }
+            break;
+
+          case 'BLINK':
+            // 1. Log every frame during BLINK state
+            console.log(
+              `[Liveness Debug] State: BLINK | avgEar: ${avgEar.toFixed(4)} | smoothedEar: ${smoothedEar.toFixed(4)} | blinkSubState: ${isEyeClosed.current ? 'CLOSED' : 'OPEN'} | Thresholds: closed < ${LIVENESS_CONSTANTS.EAR_THRESHOLD.toFixed(2)}, open > ${LIVENESS_CONSTANTS.EAR_OPEN_THRESHOLD.toFixed(2)}`
+            );
+
+            // Blink event: eyes closed -> eyes opened
+            if (!isEyeClosed.current && avgEar < LIVENESS_CONSTANTS.EAR_THRESHOLD) {
+              isEyeClosed.current = true;
+              console.log(`[Liveness Debug] Transition OPEN -> CLOSED | avgEar: ${avgEar.toFixed(4)} | threshold: ${LIVENESS_CONSTANTS.EAR_THRESHOLD}`);
+              console.log('[Liveness Machine] Eyes closed');
+            } else if (isEyeClosed.current && avgEar > LIVENESS_CONSTANTS.EAR_OPEN_THRESHOLD) {
+              isEyeClosed.current = false;
+              console.log(`[Liveness Debug] Transition CLOSED -> OPEN | avgEar: ${avgEar.toFixed(4)} | threshold: ${LIVENESS_CONSTANTS.EAR_OPEN_THRESHOLD}`);
+              console.log('[Liveness Debug] Blink detected! Transitioning to TURN_LEFT');
+              console.log('[Liveness Machine] Eyes opened - Blink confirmed!');
+              transitionToState('TURN_LEFT');
+            }
+            break;
+
+          case 'TURN_LEFT':
+            if (yaw < LIVENESS_CONSTANTS.YAW_LEFT_DEGREE_THRESHOLD) {
+              consecutiveFramesCount.current += 1;
+              if (consecutiveFramesCount.current >= LIVENESS_CONSTANTS.CONSECUTIVE_FRAMES_THRESHOLD) {
+                transitionToState('TURN_RIGHT');
+              }
+            } else {
+              consecutiveFramesCount.current = 0;
+            }
+            break;
+
+          case 'TURN_RIGHT':
+            if (yaw > LIVENESS_CONSTANTS.YAW_RIGHT_DEGREE_THRESHOLD) {
+              consecutiveFramesCount.current += 1;
+              if (consecutiveFramesCount.current >= LIVENESS_CONSTANTS.CONSECUTIVE_FRAMES_THRESHOLD) {
+                transitionToState('LIVENESS_PASSED');
+              }
+            } else {
+              consecutiveFramesCount.current = 0;
+            }
+            break;
+
+          default:
+            break;
+        }
       }
-
-      // Check timeout (except for initial WAITING_FOR_FACE)
-      const elapsed = Date.now() - stateStartTimeRef.current;
-      if (elapsed > LIVENESS_CONSTANTS.STATE_TIMEOUT_MS) {
-        return 'FAILED';
-      }
-
-      switch (currentState) {
-        case 'FACE_CENTERED': {
-          if (!isFaceCentered(landmarks)) {
-            // Drop back if face is misaligned
-            return 'FACE_CENTERED';
-          }
-          consecutiveMatchRef.current += 1;
-          if (consecutiveMatchRef.current >= 5) {
-            consecutiveMatchRef.current = 0;
-            return 'BLINK';
-          }
-          return 'FACE_CENTERED';
-        }
-
-        case 'BLINK': {
-          // Blink event transition detection: OPEN -> CLOSED (EAR < 0.22) -> OPEN (EAR > 0.25)
-          if (blinkSubStateRef.current === 'LOOKING_FOR_CLOSED') {
-            if (smoothedEAR < LIVENESS_CONSTANTS.EAR_THRESHOLD) {
-              blinkSubStateRef.current = 'LOOKING_FOR_OPEN';
-            }
-          } else if (blinkSubStateRef.current === 'LOOKING_FOR_OPEN') {
-            if (smoothedEAR > 0.25) {
-              blinkSubStateRef.current = 'LOOKING_FOR_CLOSED';
-              return 'TURN_LEFT';
-            }
-          }
-          return 'BLINK';
-        }
-
-        case 'TURN_LEFT': {
-          if (smoothedDirection === 'LEFT') {
-            consecutiveMatchRef.current += 1;
-            if (consecutiveMatchRef.current >= LIVENESS_CONSTANTS.CONSECUTIVE_FRAMES_THRESHOLD) {
-              consecutiveMatchRef.current = 0;
-              return 'TURN_RIGHT';
-            }
-          } else {
-            consecutiveMatchRef.current = 0;
-          }
-          return 'TURN_LEFT';
-        }
-
-        case 'TURN_RIGHT': {
-          if (smoothedDirection === 'RIGHT') {
-            consecutiveMatchRef.current += 1;
-            if (consecutiveMatchRef.current >= LIVENESS_CONSTANTS.CONSECUTIVE_FRAMES_THRESHOLD) {
-              consecutiveMatchRef.current = 0;
-              return 'PASSED';
-            }
-          } else {
-            consecutiveMatchRef.current = 0;
-          }
-          return 'TURN_RIGHT';
-        }
-
-        default:
-          return currentState;
-      }
-    });
-  }, [livenessState]);
+    }
+  }, [transitionToState]);
 
   // Safely bridge callback into isolated frame processor worklet thread
   const onFaceDetected = useRef(Worklets.createRunOnJS(processLandmarks)).current;
@@ -244,15 +252,17 @@ export const CameraScreen: React.FC = () => {
   // Frame processor execution logic
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
-    if (plugin == null) return;
     
-    // Throttle: process once every 3 frames (approx. 10 FPS at 30 FPS camera output)
-    frameCounter = (frameCounter + 1) % 3;
-    if (frameCounter !== 0) return;
+    // Throttle: process once every 3 frames (approx. 10 FPS)
+    frameCounter.value = (frameCounter.value + 1) % 3;
+    // console.log('[Worklet Thread] Frame received, counter:', frameCounter.value);
+    if (frameCounter.value !== 0) return;
 
-    const landmarks = plugin.call(frame);
-    onFaceDetected(landmarks);
-  }, [plugin, onFaceDetected]);
+    // console.log('[Worklet Thread] Executing face detection...');
+    const faces = faceDetector.detectFaces(frame);
+    // console.log('[Worklet Thread] Face detection result count:', faces.length);
+    onFaceDetected(faces);
+  }, [faceDetector, onFaceDetected, frameCounter]);
 
   // Request permissions on mount
   useEffect(() => {
@@ -260,53 +270,6 @@ export const CameraScreen: React.FC = () => {
       requestPermission();
     }
   }, [hasPermission, requestPermission]);
-
-  // Dynamic border color based on validation state
-  const getFocusBorderColor = () => {
-    switch (livenessState) {
-      case 'WAITING_FOR_FACE':
-        return 'rgba(255, 255, 255, 0.3)';
-      case 'FACE_CENTERED':
-        return '#4B7BFF'; // Blue
-      case 'BLINK':
-      case 'TURN_LEFT':
-      case 'TURN_RIGHT':
-        return '#FFB020'; // Yellow
-      case 'PASSED':
-        return '#10B981'; // Green
-      case 'FAILED':
-        return '#EF4444'; // Red
-      default:
-        return 'rgba(255, 255, 255, 0.3)';
-    }
-  };
-
-  // Human-readable guidance instruction
-  const getInstruction = () => {
-    if (noFaceFrameCount >= 5) {
-      return { title: 'Face Lost', subtitle: 'Position your face clearly in the frame.' };
-    }
-    switch (livenessState) {
-      case 'WAITING_FOR_FACE':
-        return { title: 'Position Your Face', subtitle: 'Align your face inside the oval guide frame.' };
-      case 'FACE_CENTERED':
-        return { title: 'Aligning Face...', subtitle: 'Keep still and maintain center position.' };
-      case 'BLINK':
-        return { title: 'Please Blink', subtitle: 'Blink both eyes naturally to verify active presence.' };
-      case 'TURN_LEFT':
-        return { title: 'Turn Head Left', subtitle: 'Slowly turn your head to the left side.' };
-      case 'TURN_RIGHT':
-        return { title: 'Turn Head Right', subtitle: 'Slowly turn your head to the right side.' };
-      case 'PASSED':
-        return { title: 'Liveness Passed', subtitle: 'Offline active presence check successful.' };
-      case 'FAILED':
-        return { title: 'Verification Failed', subtitle: 'Verification timed out. Please try again.' };
-      default:
-        return { title: 'Position Your Face', subtitle: 'Ensure you are in a well-lit environment.' };
-    }
-  };
-
-  const instruction = getInstruction();
 
   if (!hasPermission) {
     return (
@@ -339,6 +302,63 @@ export const CameraScreen: React.FC = () => {
     );
   }
 
+  const getInstructionMessage = (state: LivenessState) => {
+    switch (state) {
+      case 'WAITING_FOR_FACE':
+        return 'Align your face inside the target frame';
+      case 'FACE_CENTERED':
+        return 'Face centered. Hold still...';
+      case 'BLINK':
+        return 'Please BLINK your eyes once';
+      case 'TURN_LEFT':
+        return 'Now, slowly TURN your head LEFT';
+      case 'TURN_RIGHT':
+        return 'Now, slowly TURN your head RIGHT';
+      case 'LIVENESS_PASSED':
+        return 'Identity verified! Liveness check passed.';
+      case 'LIVENESS_FAILED':
+        return 'Verification timed out. Please try again.';
+      default:
+        return 'Preparing camera stream...';
+    }
+  };
+
+  const getStatusLabel = () => {
+    switch (livenessState) {
+      case 'WAITING_FOR_FACE':
+        return 'Awaiting face detection...';
+      case 'FACE_CENTERED':
+        return 'Locking face coordinates...';
+      case 'BLINK':
+        return 'Waiting for blink event...';
+      case 'TURN_LEFT':
+        return 'Waiting for left head turn...';
+      case 'TURN_RIGHT':
+        return 'Waiting for right head turn...';
+      case 'LIVENESS_PASSED':
+        return 'Liveness Verified';
+      case 'LIVENESS_FAILED':
+        return 'Check failed due to timeout';
+      default:
+        return 'Active';
+    }
+  };
+
+  const getFrameColor = () => {
+    switch (livenessState) {
+      case 'LIVENESS_PASSED':
+        return '#00FF66'; // Green
+      case 'LIVENESS_FAILED':
+        return '#FF3366'; // Red
+      case 'WAITING_FOR_FACE':
+        return '#8A8F9E'; // Gray
+      case 'FACE_CENTERED':
+        return '#FFCC00'; // Yellow
+      default:
+        return '#4B7BFF'; // Blue
+    }
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
@@ -347,10 +367,9 @@ export const CameraScreen: React.FC = () => {
       <Camera
         style={StyleSheet.absoluteFillObject}
         device={device}
-        isActive={livenessState !== 'PASSED' && livenessState !== 'FAILED'}
+        isActive={livenessState !== 'LIVENESS_PASSED'} // Pause camera on success
         enableNativeZoomGesture={false}
         frameProcessor={frameProcessor}
-        pixelFormat="rgb" // MediaPipe requires RGB buffers
       />
 
       {/* Modern UI Overlays */}
@@ -358,63 +377,48 @@ export const CameraScreen: React.FC = () => {
         {/* Top Header Card */}
         <View style={styles.headerCard}>
           <Text style={styles.headerText}>OFFLINE FACIAL AUTHENTICATION</Text>
-          <View style={[styles.badge, livenessState === 'PASSED' && styles.passedBadge, livenessState === 'FAILED' && styles.failedBadge]}>
-            <View style={[styles.dot, livenessState === 'PASSED' && styles.passedDot, livenessState === 'FAILED' && styles.failedDot]} />
-            <Text style={[styles.badgeText, livenessState === 'PASSED' && styles.passedText, livenessState === 'FAILED' && styles.failedText]}>
-              {livenessState === 'PASSED' ? 'Verification Passed' : livenessState === 'FAILED' ? 'Verification Failed' : 'Active Liveness Check'}
+          <View style={[styles.badge, { backgroundColor: livenessState === 'LIVENESS_PASSED' ? 'rgba(0, 255, 102, 0.15)' : 'rgba(75, 123, 255, 0.15)' }]}>
+            <View style={[styles.dot, { backgroundColor: getFrameColor() }]} />
+            <Text style={[styles.badgeText, { color: getFrameColor() }]}>
+              {livenessState === 'LIVENESS_PASSED' ? 'LIVENESS OK' : 'ACTIVE LIVENESS'}
             </Text>
           </View>
         </View>
 
         {/* Center Guide Target Frame */}
         <View style={styles.focusFrameContainer}>
-          <View style={[styles.focusFrame, { borderColor: getFocusBorderColor() }]} />
+          <View style={[styles.focusFrame, { borderColor: getFrameColor() }]} />
         </View>
 
         {/* Bottom Instruction Panel */}
         <View style={styles.footerPanel}>
-          {livenessState === 'FAILED' ? (
-            <>
-              <Text style={[styles.instructionTitle, { color: '#EF4444' }]}>{instruction.title}</Text>
-              <Text style={styles.instructionSubtitle}>{instruction.subtitle}</Text>
-              <TouchableOpacity style={styles.retryButton} onPress={resetLiveness}>
-                <Text style={styles.retryButtonText}>Try Again</Text>
-              </TouchableOpacity>
-            </>
-          ) : livenessState === 'PASSED' ? (
-            <>
-              <Text style={[styles.instructionTitle, { color: '#10B981' }]}>{instruction.title}</Text>
-              <Text style={styles.instructionSubtitle}>{instruction.subtitle}</Text>
-              <TouchableOpacity style={styles.passedButton} onPress={resetLiveness}>
-                <Text style={styles.passedButtonText}>Done</Text>
-              </TouchableOpacity>
-            </>
+          <Text style={styles.instructionTitle}>
+            {livenessState === 'LIVENESS_PASSED' ? 'Verification Passed!' : 
+             livenessState === 'LIVENESS_FAILED' ? 'Verification Failed' : 'Active Liveness Check'}
+          </Text>
+          <Text style={[
+            styles.instructionSubtitle, 
+            { color: livenessState === 'LIVENESS_PASSED' ? '#00FF66' : livenessState === 'LIVENESS_FAILED' ? '#FF3366' : '#8A8F9E' }
+          ]}>
+            {getInstructionMessage(livenessState)}
+          </Text>
+          
+          {livenessState === 'LIVENESS_FAILED' ? (
+            <TouchableOpacity 
+              style={[styles.button, { marginTop: 10, backgroundColor: '#FF3366' }]} 
+              onPress={() => transitionToState('WAITING_FOR_FACE')}
+            >
+              <Text style={styles.buttonText}>Try Again</Text>
+            </TouchableOpacity>
           ) : (
-            <>
-              <Text style={styles.instructionTitle}>{instruction.title}</Text>
-              <Text style={styles.instructionSubtitle}>{instruction.subtitle}</Text>
-
-              {/* Progress Steps Indicators */}
-              <View style={styles.stepsContainer}>
-                <View style={[styles.stepItem, livenessState !== 'WAITING_FOR_FACE' && styles.stepCompleted]}>
-                  <Text style={[styles.stepText, livenessState !== 'WAITING_FOR_FACE' && styles.stepTextCompleted]}>Centered</Text>
-                </View>
-                <View style={[styles.stepItem, (livenessState === 'TURN_LEFT' || livenessState === 'TURN_RIGHT' || livenessState === 'PASSED') && styles.stepCompleted]}>
-                  <Text style={[styles.stepText, (livenessState === 'TURN_LEFT' || livenessState === 'TURN_RIGHT' || livenessState === 'PASSED') && styles.stepTextCompleted]}>Blink</Text>
-                </View>
-                <View style={[styles.stepItem, (livenessState === 'TURN_RIGHT' || livenessState === 'PASSED') && styles.stepCompleted]}>
-                  <Text style={[styles.stepText, (livenessState === 'TURN_RIGHT' || livenessState === 'PASSED') && styles.stepTextCompleted]}>Left Turn</Text>
-                </View>
-                <View style={[styles.stepItem, livenessState === 'PASSED' && styles.stepCompleted]}>
-                  <Text style={[styles.stepText, livenessState === 'PASSED' && styles.stepTextCompleted]}>Right Turn</Text>
-                </View>
-              </View>
-
-              <View style={styles.statusBox}>
-                <ActivityIndicator size="small" color="#4B7BFF" style={styles.loader} />
-                <Text style={styles.statusText}>Analyzing Active Presence...</Text>
-              </View>
-            </>
+            <View style={styles.statusBox}>
+              {livenessState !== 'LIVENESS_PASSED' && livenessState !== 'LIVENESS_FAILED' && (
+                <ActivityIndicator size="small" color={getFrameColor()} style={styles.loader} />
+              )}
+              <Text style={[styles.statusText, { color: getFrameColor() }]}>
+                {getStatusLabel()}
+              </Text>
+            </View>
           )}
         </View>
       </View>
@@ -427,12 +431,13 @@ export const CameraScreen: React.FC = () => {
 
         {showTelemetry && (
           <View style={styles.telemetryConsole}>
+            <Text style={styles.telemetryLine}>State: <Text style={[styles.telemetryValue, { color: getFrameColor() }]}>{livenessState}</Text></Text>
             <Text style={styles.telemetryLine}>FPS: <Text style={styles.telemetryValue}>{fps}</Text></Text>
-            <Text style={styles.telemetryLine}>State: <Text style={styles.telemetryValue}>{livenessState}</Text></Text>
-            <Text style={styles.telemetryLine}>EAR: <Text style={styles.telemetryValue}>{liveEar.toFixed(3)}</Text></Text>
-            <Text style={styles.telemetryLine}>Yaw: <Text style={styles.telemetryValue}>{liveYaw.toFixed(3)}</Text></Text>
-            <Text style={styles.telemetryLine}>Turn: <Text style={styles.telemetryValue}>{direction}</Text></Text>
-            <Text style={styles.telemetryLine}>Blink Event Sub: <Text style={styles.telemetryValue}>{blinkSubStateRef.current}</Text></Text>
+            <Text style={styles.telemetryLine}>Faces: <Text style={styles.telemetryValue}>{faceCount}</Text></Text>
+            <Text style={styles.telemetryLine}>Yaw: <Text style={styles.telemetryValue}>{liveYaw.toFixed(1)}°</Text></Text>
+            <Text style={styles.telemetryLine}>Smoothed EAR: <Text style={styles.telemetryValue}>{liveEar.toFixed(3)}</Text></Text>
+            <Text style={styles.telemetryLine}>Left Eye Prob: <Text style={styles.telemetryValue}>{leftOpenProb.toFixed(3)}</Text></Text>
+            <Text style={styles.telemetryLine}>Right Eye Prob: <Text style={styles.telemetryValue}>{rightOpenProb.toFixed(3)}</Text></Text>
           </View>
         )}
       </View>
@@ -527,12 +532,6 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 100,
   },
-  passedBadge: {
-    backgroundColor: 'rgba(16, 185, 129, 0.15)',
-  },
-  failedBadge: {
-    backgroundColor: 'rgba(239, 68, 68, 0.15)',
-  },
   dot: {
     width: 6,
     height: 6,
@@ -540,22 +539,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#4B7BFF',
     marginRight: 6,
   },
-  passedDot: {
-    backgroundColor: '#10B981',
-  },
-  failedDot: {
-    backgroundColor: '#EF4444',
-  },
   badgeText: {
     color: '#4B7BFF',
     fontSize: 11,
     fontWeight: '700',
-  },
-  passedText: {
-    color: '#10B981',
-  },
-  failedText: {
-    color: '#EF4444',
   },
   focusFrameContainer: {
     flex: 1,
@@ -591,72 +578,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 18,
     marginBottom: 20,
-  },
-  retryButton: {
-    width: '100%',
-    height: 48,
-    backgroundColor: '#EF4444',
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#EF4444',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  retryButtonText: {
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  passedButton: {
-    width: '100%',
-    height: 48,
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#10B981',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  passedButtonText: {
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  stepsContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: '100%',
-    marginBottom: 20,
-    paddingHorizontal: 10,
-  },
-  stepItem: {
-    flex: 1,
-    height: 32,
-    marginHorizontal: 4,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  stepCompleted: {
-    backgroundColor: 'rgba(75, 123, 255, 0.15)',
-    borderColor: 'rgba(75, 123, 255, 0.4)',
-  },
-  stepText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#5A6071',
-  },
-  stepTextCompleted: {
-    color: '#4B7BFF',
   },
   statusBox: {
     flexDirection: 'row',
@@ -702,7 +623,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 12,
     marginTop: 8,
-    width: 200,
+    width: 210,
   },
   telemetryLine: {
     color: '#8A8F9E',

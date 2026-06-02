@@ -116,7 +116,4 @@ dependencies {
     } else {
         implementation jscFlavor
     }
-
-    // MediaPipe Face Landmarker dependency
-    implementation 'com.google.mediapipe:tasks-vision:0.10.14'
 }

@@ -2,11 +2,12 @@
 
 export const LIVENESS_CONSTANTS = {
   // Eye Aspect Ratio (EAR) threshold for blink detection
-  EAR_THRESHOLD: 0.22,
+  EAR_THRESHOLD: 0.21, // Closed threshold (avgEar must drop below this)
+  EAR_OPEN_THRESHOLD: 0.24, // Opened threshold (avgEar must rise above this)
 
-  // Yaw thresholds for head turn detection (nose tip distance ratio)
-  YAW_LEFT_THRESHOLD: 0.5,
-  YAW_RIGHT_THRESHOLD: 2.0,
+  // Yaw thresholds in degrees for head turn detection (MLKit native yawAngle)
+  YAW_LEFT_DEGREE_THRESHOLD: -15, // Degrees (negative value for turning left)
+  YAW_RIGHT_DEGREE_THRESHOLD: 15, // Degrees (positive value for turning right)
 
   // Face recognition model configuration
   RECOGNITION_THRESHOLD: 0.80,
@@ -15,16 +16,12 @@ export const LIVENESS_CONSTANTS = {
   // Camera settings
   DEFAULT_CAMERA_POSITION: 'front' as const,
 
-  // Landmark Indices (MediaPipe Face Mesh 468 landmarks mapping)
-  LEFT_EYE_POINTS: [33, 160, 158, 133, 153, 144],
-  RIGHT_EYE_POINTS: [362, 385, 387, 263, 373, 380],
-  NOSE_TIP_POINT: 1,
-  LEFT_FACE_EDGE_POINT: 234,
-  RIGHT_FACE_EDGE_POINT: 454,
-
+  // Landmark Indices (MLKit 16-point eye contours mapping)
+  LEFT_EYE_POINTS: [0, 3, 5, 8, 11, 13],
+  RIGHT_EYE_POINTS: [0, 3, 5, 8, 11, 13],
+  
   // Liveness validation config
   SMOOTHING_WINDOW_SIZE: 5,
   CONSECUTIVE_FRAMES_THRESHOLD: 3, // For head turn confirmation
   STATE_TIMEOUT_MS: 10000, // 10 seconds timeout per state
 };
-

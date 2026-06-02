@@ -40,10 +40,5 @@ class MainApplication : Application(), ReactApplication {
       // If you opted-in for the New Architecture, we load the native entry point for this app.
       load()
     }
-
-    // Register custom MediaPipe Face Mesh frame processor plugin
-    com.mrousavy.camera.frameprocessors.FrameProcessorPluginRegistry.addFrameProcessorPlugin("detectFaceMesh") { proxy: com.mrousavy.camera.frameprocessors.VisionCameraProxy, options: Map<String, Any>? ->
-      FaceMeshFrameProcessorPlugin(proxy, options)
-    }
   }
 }
