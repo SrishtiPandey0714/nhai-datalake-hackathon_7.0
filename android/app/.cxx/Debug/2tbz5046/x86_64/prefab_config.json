@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "prefabPath": "C:\\Users\\shash\\.gradle\\caches\\modules-2\\files-2.1\\com.google.prefab\\cli\\2.1.0\\aa32fec809c44fa531f01dcfb739b5b3304d3050\\cli-2.1.0-all.jar",
+  "packages": [
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native-vision-camera\\android\\build\\intermediates\\prefab_package\\debug\\prefab",
+    "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\43f4674cac1403748b5c67e32e29c561\\transformed\\react-android-0.76.0-debug\\prefab",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\@op-engineering\\op-sqlite\\android\\build\\intermediates\\prefab_package\\debug\\prefab",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native-worklets-core\\android\\build\\intermediates\\prefab_package\\debug\\prefab",
+    "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\fbfaa723d48cff552f1a100595b2d414\\transformed\\hermes-android-0.76.0-debug\\prefab",
+    "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\b7e1445602795066ac1df3ccf77e3c9e\\transformed\\fbjni-0.6.0\\prefab"
+  ]
+}

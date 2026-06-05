@@ -1,3 +1,5 @@
+// src/screens/CameraScreen.tsx
+
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import {
   StyleSheet,
@@ -7,12 +9,18 @@ import {
   ActivityIndicator,
   StatusBar,
   Dimensions,
+  Platform,
 } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, useFrameProcessor } from 'react-native-vision-camera';
 import { Worklets, useSharedValue } from 'react-native-worklets-core';
 import { useFaceDetector } from 'react-native-vision-camera-face-detector';
+import { useTensorflowModel } from 'react-native-fast-tflite';
 import { LIVENESS_CONSTANTS } from '../constants/liveness';
 import { calculateEAR } from '../utils/livenessMath';
+import { EnrollmentSession } from '../services/enrollmentService';
+import { generateEmbedding, EMBEDDING_CONFIG } from '../services/embeddingProvider';
+import { getEmployeeById, logAttendance } from '../services/database';
+import { calculateCosineSimilarity } from '../utils/embeddingUtils';
 
 const { width: windowWidth, height: windowHeight } = Dimensions.get('window');
 
@@ -23,14 +31,89 @@ type LivenessState =
   | 'TURN_LEFT'
   | 'TURN_RIGHT'
   | 'LIVENESS_PASSED'
+  | 'UNKNOWN_FACE'
   | 'LIVENESS_FAILED';
 
-export const CameraScreen: React.FC = () => {
+export interface CameraScreenProps {
+  mode?: 'enrollment' | 'verification';
+  employeeId?: string;
+  name?: string;
+  onClose?: () => void;
+  onEnrollSuccess?: () => void;
+}
+
+export const CameraScreen: React.FC<CameraScreenProps> = ({
+  mode = 'verification',
+  employeeId,
+  name,
+  onClose,
+  onEnrollSuccess,
+}) => {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice(LIVENESS_CONSTANTS.DEFAULT_CAMERA_POSITION);
 
+  // Load the quantized EfficientNet TFLite model on mount
+  const delegateType = Platform.OS === 'ios' ? 'core-ml' : 'nnapi';
+  
+  const modelSource = useMemo(() => {
+    return Platform.OS === 'android'
+      ? { url: 'efficientnet_quantized_512' }
+      : require('../../assets/models/efficientnet_quantized_512.tflite');
+  }, []);
+
+  const plugin = useTensorflowModel(modelSource, delegateType);
+  const model = plugin.model;
+
+  // Add temporary logging for model verification
+  useEffect(() => {
+    console.log(`[TFLite Loading] Model state updated: ${plugin.state}`);
+    if (plugin.state === 'loading') {
+      console.log('[TFLite Loading] Loading TFLite model...');
+    } else if (plugin.state === 'loaded' && plugin.model) {
+      console.log('[TFLite Loading] Model loaded successfully');
+      plugin.model.inputs.forEach((input, index) => {
+        console.log(`[TFLite Loading] Input Tensor #${index}: Name="${input.name}", Shape=[${input.shape.join(',')}], DataType="${input.dataType}"`);
+      });
+      plugin.model.outputs.forEach((output, index) => {
+        console.log(`[TFLite Loading] Output Tensor #${index}: Name="${output.name}", Shape=[${output.shape.join(',')}], DataType="${output.dataType}"`);
+      });
+    } else if (plugin.state === 'error') {
+      console.error('[TFLite Loading] Failed to load model:', plugin.error);
+    }
+  }, [plugin]);
+
   // Persistent shared value for frame throttling inside the worklet
-  const frameCounter = useSharedValue(0);
+  const recognitionFrameCounter = useSharedValue(0);
+  const isLivenessPassedShared = useSharedValue(false);
+  const isEnrollmentModeShared = useSharedValue(mode === 'enrollment');
+  const employeeIdShared = useSharedValue(employeeId || '');
+
+  // Synchronize the mode value with the worklet thread
+  useEffect(() => {
+    isEnrollmentModeShared.value = mode === 'enrollment';
+  }, [mode, isEnrollmentModeShared]);
+
+  useEffect(() => {
+    employeeIdShared.value = employeeId || '';
+  }, [employeeId, employeeIdShared]);
+
+  // Lifecycle-safe initialization of EnrollmentSession inside the component
+  const enrollmentSessionRef = useRef<EnrollmentSession | null>(null);
+  const [capturedCount, setCapturedCount] = useState(0);
+  const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
+  const [enrollmentSuccess, setEnrollmentSuccess] = useState(false);
+  const lastCaptureTimeRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (mode === 'enrollment' && employeeId && name) {
+      enrollmentSessionRef.current = new EnrollmentSession(employeeId, name);
+      setCapturedCount(0);
+      setEnrollmentError(null);
+      setEnrollmentSuccess(false);
+    } else {
+      enrollmentSessionRef.current = null;
+    }
+  }, [mode, employeeId, name]);
 
   // Initialize third-party MLKit Face Detector plugin with screen-scaled autoMode
   const faceDetector = useFaceDetector(useMemo(() => ({
@@ -53,6 +136,12 @@ export const CameraScreen: React.FC = () => {
   const [rightOpenProb, setRightOpenProb] = useState(0);
   const [showTelemetry, setShowTelemetry] = useState(true);
 
+  // Biometrics and Recognition states
+  const [recognizedName, setRecognizedName] = useState<string | null>(null);
+  const [confidenceScore, setConfidenceScore] = useState<number>(0);
+  const [inferenceTime, setInferenceTime] = useState<number>(0);
+  const [embeddingSource, setEmbeddingSource] = useState<string>('MOCK');
+
   // Liveness State Machine variables
   const [livenessState, setLivenessState] = useState<LivenessState>('WAITING_FOR_FACE');
   const livenessStateRef = useRef<LivenessState>('WAITING_FOR_FACE');
@@ -61,6 +150,11 @@ export const CameraScreen: React.FC = () => {
   const isEyeClosed = useRef<boolean>(false);
   const earHistory = useRef<number[]>([]);
 
+  // Verification history refs
+  const lastMatchedIndex = useRef<number>(-1);
+  const consecutiveMatches = useRef<number>(0);
+  const predictionHistory = useRef<{ index: number; confidence: number }[]>([]);
+
   // State transition helper
   const transitionToState = useCallback((newState: LivenessState) => {
     livenessStateRef.current = newState;
@@ -68,16 +162,18 @@ export const CameraScreen: React.FC = () => {
     stateStartedTime.current = Date.now();
     consecutiveFramesCount.current = 0;
     isEyeClosed.current = false;
+
+    // Notify frame processor worklet if active scanning is enabled
+    isLivenessPassedShared.value = (newState === 'LIVENESS_PASSED' || newState === 'UNKNOWN_FACE');
+
     console.log(`[Liveness Machine] Transitioned to state: ${newState}`);
-  }, []);
+  }, [isLivenessPassedShared]);
 
   // Performance timers
   const lastFrameTimeRef = useRef<number>(0);
 
   // Safe handler callback to update state and log coordinates on JS thread
-  const processLandmarks = useCallback((faces: any) => {
-    // console.log(`[JS Thread] processLandmarks called. Detected faces: ${faces?.length ?? 0}`);
-    
+  const processLandmarks = useCallback((faces: any, biometricsResult?: any) => {
     // 1. Calculate FPS
     const now = Date.now();
     if (lastFrameTimeRef.current > 0) {
@@ -91,12 +187,19 @@ export const CameraScreen: React.FC = () => {
       setFaceCount(0);
       setContourCount(0);
       setLiveEar(0);
-      if (
-        livenessStateRef.current !== 'WAITING_FOR_FACE' &&
-        livenessStateRef.current !== 'LIVENESS_PASSED' &&
-        livenessStateRef.current !== 'LIVENESS_FAILED'
-      ) {
+      
+      const currentState = livenessStateRef.current;
+      const isScanning = (currentState === 'LIVENESS_PASSED' && !recognizedName) || currentState === 'UNKNOWN_FACE';
+      const isLivenessActive = currentState !== 'WAITING_FOR_FACE' && currentState !== 'LIVENESS_FAILED' && (currentState !== 'LIVENESS_PASSED' || isScanning);
+
+      if (isLivenessActive) {
         console.log('[Liveness Machine] Face lost, resetting to WAITING_FOR_FACE');
+        
+        // Reset biometrics verification history
+        consecutiveMatches.current = 0;
+        lastMatchedIndex.current = -1;
+        predictionHistory.current = [];
+        
         transitionToState('WAITING_FOR_FACE');
       }
       return;
@@ -112,9 +215,6 @@ export const CameraScreen: React.FC = () => {
     // Set raw Yaw Angle
     const yaw = face.yawAngle ?? 0;
     setLiveYaw(yaw);
-
-    const faceCenterX = face.bounds.x + face.bounds.width / 2.0;
-    // console.log(`[JS Thread] face.bounds: ${JSON.stringify(face.bounds)} | yaw: ${yaw.toFixed(2)} | faceCenterX: ${faceCenterX.toFixed(2)}`);
 
     // Process face contours
     const contours = face.contours;
@@ -147,7 +247,6 @@ export const CameraScreen: React.FC = () => {
         }
         const smoothedEar = earHistory.current.reduce((a, b) => a + b, 0) / earHistory.current.length;
         setLiveEar(smoothedEar);
-        // console.log(`[Liveness Machine] EAR calculated: ${smoothedEar.toFixed(4)} | avgEar: ${avgEar.toFixed(4)} | state: ${livenessStateRef.current} | isEyeClosed: ${isEyeClosed.current}`);
 
         // Face centering calculation (using screen coordinates from autoMode)
         const faceCenterX = face.bounds.x + face.bounds.width / 2.0;
@@ -163,6 +262,7 @@ export const CameraScreen: React.FC = () => {
         if (
           livenessStateRef.current !== 'WAITING_FOR_FACE' &&
           livenessStateRef.current !== 'LIVENESS_PASSED' &&
+          livenessStateRef.current !== 'UNKNOWN_FACE' &&
           livenessStateRef.current !== 'LIVENESS_FAILED'
         ) {
           const elapsed = Date.now() - stateStartedTime.current;
@@ -176,7 +276,7 @@ export const CameraScreen: React.FC = () => {
         // State Machine transitions
         switch (livenessStateRef.current) {
           case 'WAITING_FOR_FACE':
-            if (isCentered) {
+            if (isCentered && model) {
               consecutiveFramesCount.current += 1;
               if (consecutiveFramesCount.current >= 3) {
                 transitionToState('FACE_CENTERED');
@@ -198,20 +298,12 @@ export const CameraScreen: React.FC = () => {
             break;
 
           case 'BLINK':
-            // 1. Log every frame during BLINK state
-            console.log(
-              `[Liveness Debug] State: BLINK | avgEar: ${avgEar.toFixed(4)} | smoothedEar: ${smoothedEar.toFixed(4)} | blinkSubState: ${isEyeClosed.current ? 'CLOSED' : 'OPEN'} | Thresholds: closed < ${LIVENESS_CONSTANTS.EAR_THRESHOLD.toFixed(2)}, open > ${LIVENESS_CONSTANTS.EAR_OPEN_THRESHOLD.toFixed(2)}`
-            );
-
             // Blink event: eyes closed -> eyes opened
             if (!isEyeClosed.current && avgEar < LIVENESS_CONSTANTS.EAR_THRESHOLD) {
               isEyeClosed.current = true;
-              console.log(`[Liveness Debug] Transition OPEN -> CLOSED | avgEar: ${avgEar.toFixed(4)} | threshold: ${LIVENESS_CONSTANTS.EAR_THRESHOLD}`);
               console.log('[Liveness Machine] Eyes closed');
             } else if (isEyeClosed.current && avgEar > LIVENESS_CONSTANTS.EAR_OPEN_THRESHOLD) {
               isEyeClosed.current = false;
-              console.log(`[Liveness Debug] Transition CLOSED -> OPEN | avgEar: ${avgEar.toFixed(4)} | threshold: ${LIVENESS_CONSTANTS.EAR_OPEN_THRESHOLD}`);
-              console.log('[Liveness Debug] Blink detected! Transitioning to TURN_LEFT');
               console.log('[Liveness Machine] Eyes opened - Blink confirmed!');
               transitionToState('TURN_LEFT');
             }
@@ -242,9 +334,86 @@ export const CameraScreen: React.FC = () => {
           default:
             break;
         }
+
+        // Biometric Face Recognition / Enrollment processing
+        if (biometricsResult && (livenessStateRef.current === 'LIVENESS_PASSED' || livenessStateRef.current === 'UNKNOWN_FACE')) {
+          if (biometricsResult.embeddingSource) {
+            setEmbeddingSource(biometricsResult.embeddingSource);
+          }
+
+          if (mode === 'enrollment') {
+            if (biometricsResult.qualityError) {
+              setEnrollmentError(biometricsResult.qualityError);
+              return;
+            }
+
+            if (biometricsResult.embedding) {
+              const currentTime = Date.now();
+              // Enforce 500ms capture spacing between enrollment samples
+              if (currentTime - lastCaptureTimeRef.current >= 500) {
+                if (enrollmentSessionRef.current) {
+                  const floatArray = new Float32Array(biometricsResult.embedding);
+                  const result = enrollmentSessionRef.current.addEmbedding(floatArray);
+
+                  if (result.status === 'collecting') {
+                    setCapturedCount(result.count);
+                    setEnrollmentError(null);
+                  } else if (result.status === 'quality_rejected') {
+                    setEnrollmentError(result.error || 'Face is too static');
+                  } else if (result.status === 'complete') {
+                    setCapturedCount(5);
+                    setEnrollmentSuccess(true);
+                    setEnrollmentError(null);
+                    console.log('[CameraScreen] Enrollment complete');
+                    
+                    setTimeout(() => {
+                      if (onEnrollSuccess) onEnrollSuccess();
+                    }, 2000);
+                  } else if (result.status === 'error') {
+                    setEnrollmentError(result.error || 'Registration failed');
+                  }
+                }
+                lastCaptureTimeRef.current = currentTime;
+              }
+            }
+            return;
+          }
+
+          // Verification Mode - match against stored template using cosine similarity
+          const empRecord = employeeId ? getEmployeeById(employeeId) : null;
+          if (empRecord && biometricsResult.embedding) {
+            const currentEmbedding = new Float32Array(biometricsResult.embedding);
+            const templateEmbedding = empRecord.embedding;
+            const similarity = calculateCosineSimilarity(currentEmbedding, templateEmbedding);
+            
+            setInferenceTime(biometricsResult.inferenceTime ?? 0);
+            setConfidenceScore(similarity);
+            
+            if (similarity >= 0.80) {
+              setRecognizedName(empRecord.name);
+              // Log attendance to local SQLite logs
+              try {
+                logAttendance(employeeId!, 'PRESENT');
+                console.log(`[CameraScreen] Attendance recorded for ${employeeId} (${empRecord.name})`);
+              } catch (dbErr) {
+                console.error('[CameraScreen] Failed to record attendance:', dbErr);
+              }
+              
+              // Automatically return to HomeScreen after successful verification
+              // A 2-second timeout allows the user to see the PASS telemetry badge
+              setTimeout(() => {
+                if (onClose) onClose();
+              }, 2000);
+            } else {
+              setRecognizedName("Access Denied");
+            }
+          } else {
+            setRecognizedName("Verification Error: Record Not Found");
+          }
+        }
       }
     }
-  }, [transitionToState]);
+  }, [transitionToState, model, mode, onEnrollSuccess, recognizedName]);
 
   // Safely bridge callback into isolated frame processor worklet thread
   const onFaceDetected = useRef(Worklets.createRunOnJS(processLandmarks)).current;
@@ -252,17 +421,96 @@ export const CameraScreen: React.FC = () => {
   // Frame processor execution logic
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
-    
-    // Throttle: process once every 3 frames (approx. 10 FPS)
-    frameCounter.value = (frameCounter.value + 1) % 3;
-    // console.log('[Worklet Thread] Frame received, counter:', frameCounter.value);
-    if (frameCounter.value !== 0) return;
 
-    // console.log('[Worklet Thread] Executing face detection...');
     const faces = faceDetector.detectFaces(frame);
-    // console.log('[Worklet Thread] Face detection result count:', faces.length);
-    onFaceDetected(faces);
-  }, [faceDetector, onFaceDetected, frameCounter]);
+    let biometricsResult = null;
+    
+    if (isLivenessPassedShared.value && faces.length > 0 && model) {
+      // Run recognition inference only on every 5th processed frame (approx. 6 FPS)
+      recognitionFrameCounter.value = (recognitionFrameCounter.value + 1) % 5;
+      if (recognitionFrameCounter.value === 0) {
+        const face = faces[0];
+        
+        let isQualityValid = true;
+        let qualityError = '';
+        
+        // 1. Perform face quality check BEFORE model inference in Enrollment Mode
+        if (isEnrollmentModeShared.value) {
+          const yaw = face.yawAngle ?? 0;
+          const faceCenterX = face.bounds.x + face.bounds.width / 2.0;
+          const faceCenterY = face.bounds.y + face.bounds.height / 2.0;
+          
+          if (Math.abs(yaw) > 10.0) {
+            isQualityValid = false;
+            qualityError = 'Keep head straight (Yaw: ' + yaw.toFixed(1) + '°)';
+          } else if (Math.abs(faceCenterX - windowWidth / 2.0) > 60.0) {
+            isQualityValid = false;
+            qualityError = 'Center your face horizontally';
+          } else if (Math.abs(faceCenterY - windowHeight / 2.0) > 100.0) {
+            isQualityValid = false;
+            qualityError = 'Center your face vertically';
+          }
+        }
+        
+        if (isQualityValid) {
+          // Map face bounding box from scaled screen coordinates back to raw frame coordinates
+          const cropX = Math.max(0, Math.round(face.bounds.x * (frame.width / windowWidth)));
+          const cropY = Math.max(0, Math.round(face.bounds.y * (frame.height / windowHeight)));
+          const cropW = Math.min(Math.round(face.bounds.width * (frame.width / windowWidth)), frame.width - cropX);
+          const cropH = Math.min(Math.round(face.bounds.height * (frame.height / windowHeight)), frame.height - cropY);
+          
+          if (cropW > 0 && cropH > 0) {
+            // Get the raw RGB frame pixel buffer
+            const frameData = new Uint8Array(frame.toArrayBuffer());
+            
+            // Crop and resize region to exactly 224x224 RGB
+            const targetSize = 224;
+            const resized = new Uint8Array(targetSize * targetSize * 3);
+            
+            for (let dy = 0; dy < targetSize; dy++) {
+              for (let dx = 0; dx < targetSize; dx++) {
+                const srcX = cropX + (dx / targetSize) * cropW;
+                const srcY = cropY + (dy / targetSize) * cropH;
+                
+                const sx = Math.min(Math.max(Math.round(srcX), 0), frame.width - 1);
+                const sy = Math.min(Math.max(Math.round(srcY), 0), frame.height - 1);
+                
+                const srcIdx = (sy * frame.width + sx) * 3;
+                const dstIdx = (dy * targetSize + dx) * 3;
+                
+                resized[dstIdx] = frameData[srcIdx];
+                resized[dstIdx + 1] = frameData[srcIdx + 1];
+                resized[dstIdx + 2] = frameData[srcIdx + 2];
+              }
+            }
+            
+            // Run TFLite inference directly on the Worklet thread and measure latency
+            const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            
+            // Generate embedding using the abstraction provider layer
+            const embeddingMode = EMBEDDING_CONFIG.mode;
+            const embedding = generateEmbedding(embeddingMode, model, resized, employeeIdShared.value);
+            
+            const end = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            const latency = end - start;
+            
+            biometricsResult = {
+              embedding: embedding,
+              inferenceTime: latency,
+              embeddingSource: embeddingMode
+            };
+          }
+        } else {
+          // Pass quality error back to update HUD
+          biometricsResult = {
+            qualityError: qualityError
+          };
+        }
+      }
+    }
+    
+    onFaceDetected(faces, biometricsResult);
+  }, [faceDetector, onFaceDetected, model, isLivenessPassedShared, recognitionFrameCounter, isEnrollmentModeShared]);
 
   // Request permissions on mount
   useEffect(() => {
@@ -303,9 +551,29 @@ export const CameraScreen: React.FC = () => {
   }
 
   const getInstructionMessage = (state: LivenessState) => {
+    if (mode === 'enrollment' && state === 'LIVENESS_PASSED') {
+      if (enrollmentSuccess) {
+        return `Registration Successful for ${name}!`;
+      }
+      if (enrollmentError) {
+        return enrollmentError;
+      }
+      return `Capturing templates: ${capturedCount} of 5. Move your head slightly.`;
+    }
+
+    if (mode === 'verification' && state === 'LIVENESS_PASSED') {
+      if (recognizedName === "Access Denied") {
+        return `Access Denied\nSimilarity: ${confidenceScore.toFixed(3)}  |  Threshold: 0.800\nResult: FAIL`;
+      }
+      if (recognizedName && !recognizedName.startsWith("Liveness Passed") && !recognizedName.startsWith("Verification Error")) {
+        return `Welcome, ${recognizedName}!\nSimilarity: ${confidenceScore.toFixed(3)}  |  Threshold: 0.800\nResult: PASS`;
+      }
+      return 'Liveness Passed. Scanning Identity...';
+    }
+
     switch (state) {
       case 'WAITING_FOR_FACE':
-        return 'Align your face inside the target frame';
+        return model ? 'Align your face inside the target frame' : 'Booting up AI Engine...';
       case 'FACE_CENTERED':
         return 'Face centered. Hold still...';
       case 'BLINK':
@@ -315,7 +583,11 @@ export const CameraScreen: React.FC = () => {
       case 'TURN_RIGHT':
         return 'Now, slowly TURN your head RIGHT';
       case 'LIVENESS_PASSED':
-        return 'Identity verified! Liveness check passed.';
+        return recognizedName 
+          ? `Welcome, ${recognizedName}! Identity Verified.` 
+          : 'Liveness Passed. Scanning Identity...';
+      case 'UNKNOWN_FACE':
+        return 'Unknown face detected. Continuing scanning...';
       case 'LIVENESS_FAILED':
         return 'Verification timed out. Please try again.';
       default:
@@ -324,9 +596,13 @@ export const CameraScreen: React.FC = () => {
   };
 
   const getStatusLabel = () => {
+    if (mode === 'enrollment' && livenessState === 'LIVENESS_PASSED') {
+      return enrollmentSuccess ? 'Enrollment Complete' : `Template Capture: ${capturedCount}/5`;
+    }
+
     switch (livenessState) {
       case 'WAITING_FOR_FACE':
-        return 'Awaiting face detection...';
+        return model ? 'Awaiting face detection...' : 'Loading Biometrics Engine...';
       case 'FACE_CENTERED':
         return 'Locking face coordinates...';
       case 'BLINK':
@@ -336,7 +612,13 @@ export const CameraScreen: React.FC = () => {
       case 'TURN_RIGHT':
         return 'Waiting for right head turn...';
       case 'LIVENESS_PASSED':
-        return 'Liveness Verified';
+        if (mode === 'verification') {
+          if (recognizedName === "Access Denied") return 'Access Denied';
+          if (recognizedName && !recognizedName.startsWith("Liveness Passed")) return 'Access Granted';
+        }
+        return recognizedName ? 'Access Granted' : 'Scanning Biometrics...';
+      case 'UNKNOWN_FACE':
+        return 'Unknown Face - Continue Scanning';
       case 'LIVENESS_FAILED':
         return 'Check failed due to timeout';
       default:
@@ -345,17 +627,23 @@ export const CameraScreen: React.FC = () => {
   };
 
   const getFrameColor = () => {
+    if (mode === 'enrollment' && livenessState === 'LIVENESS_PASSED') {
+      return enrollmentSuccess ? '#00FF66' : enrollmentError ? '#FF8800' : '#4B7BFF';
+    }
+
     switch (livenessState) {
       case 'LIVENESS_PASSED':
-        return '#00FF66'; // Green
+        return recognizedName ? '#00FF66' : '#4B7BFF';
       case 'LIVENESS_FAILED':
-        return '#FF3366'; // Red
+        return '#FF3366';
       case 'WAITING_FOR_FACE':
-        return '#8A8F9E'; // Gray
+        return '#8A8F9E';
       case 'FACE_CENTERED':
-        return '#FFCC00'; // Yellow
+        return '#FFCC00';
+      case 'UNKNOWN_FACE':
+        return '#FF8800';
       default:
-        return '#4B7BFF'; // Blue
+        return '#4B7BFF';
     }
   };
 
@@ -367,20 +655,26 @@ export const CameraScreen: React.FC = () => {
       <Camera
         style={StyleSheet.absoluteFillObject}
         device={device}
-        isActive={livenessState !== 'LIVENESS_PASSED'} // Pause camera on success
-        enableNativeZoomGesture={false}
+        isActive={!enrollmentSuccess && !recognizedName} // Pause camera on success
+        enableZoomGesture={false}
         frameProcessor={frameProcessor}
+        pixelFormat="rgb" // EfficientNet requires standard RGB colors
       />
 
       {/* Modern UI Overlays */}
       <View style={styles.overlayContainer}>
         {/* Top Header Card */}
         <View style={styles.headerCard}>
+          {onClose && (
+            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+              <Text style={styles.closeButtonText}>✕ Cancel</Text>
+            </TouchableOpacity>
+          )}
           <Text style={styles.headerText}>OFFLINE FACIAL AUTHENTICATION</Text>
-          <View style={[styles.badge, { backgroundColor: livenessState === 'LIVENESS_PASSED' ? 'rgba(0, 255, 102, 0.15)' : 'rgba(75, 123, 255, 0.15)' }]}>
+          <View style={[styles.badge, { backgroundColor: recognizedName || enrollmentSuccess ? 'rgba(0, 255, 102, 0.15)' : 'rgba(75, 123, 255, 0.15)' }]}>
             <View style={[styles.dot, { backgroundColor: getFrameColor() }]} />
             <Text style={[styles.badgeText, { color: getFrameColor() }]}>
-              {livenessState === 'LIVENESS_PASSED' ? 'LIVENESS OK' : 'ACTIVE LIVENESS'}
+              {mode === 'enrollment' ? 'BIOMETRIC ENROLLMENT' : 'ACTIVE LIVENESS'}
             </Text>
           </View>
         </View>
@@ -393,12 +687,12 @@ export const CameraScreen: React.FC = () => {
         {/* Bottom Instruction Panel */}
         <View style={styles.footerPanel}>
           <Text style={styles.instructionTitle}>
-            {livenessState === 'LIVENESS_PASSED' ? 'Verification Passed!' : 
+            {enrollmentSuccess || recognizedName ? 'Verification Passed!' : 
              livenessState === 'LIVENESS_FAILED' ? 'Verification Failed' : 'Active Liveness Check'}
           </Text>
           <Text style={[
             styles.instructionSubtitle, 
-            { color: livenessState === 'LIVENESS_PASSED' ? '#00FF66' : livenessState === 'LIVENESS_FAILED' ? '#FF3366' : '#8A8F9E' }
+            { color: enrollmentSuccess || recognizedName ? '#00FF66' : livenessState === 'LIVENESS_FAILED' ? '#FF3366' : '#8A8F9E' }
           ]}>
             {getInstructionMessage(livenessState)}
           </Text>
@@ -406,13 +700,41 @@ export const CameraScreen: React.FC = () => {
           {livenessState === 'LIVENESS_FAILED' ? (
             <TouchableOpacity 
               style={[styles.button, { marginTop: 10, backgroundColor: '#FF3366' }]} 
-              onPress={() => transitionToState('WAITING_FOR_FACE')}
+              onPress={() => {
+                consecutiveMatches.current = 0;
+                lastMatchedIndex.current = -1;
+                predictionHistory.current = [];
+                if (enrollmentSessionRef.current) {
+                  enrollmentSessionRef.current.reset();
+                  setCapturedCount(0);
+                  setEnrollmentError(null);
+                  setEnrollmentSuccess(false);
+                }
+                transitionToState('WAITING_FOR_FACE');
+              }}
             >
               <Text style={styles.buttonText}>Try Again</Text>
             </TouchableOpacity>
+          ) : enrollmentSuccess ? (
+            <ActivityIndicator size="small" color="#00FF66" style={{ marginTop: 10 }} />
+          ) : recognizedName ? (
+            <TouchableOpacity 
+              style={[styles.button, { marginTop: 10, backgroundColor: '#00FF66' }]} 
+              onPress={() => {
+                setRecognizedName(null);
+                setConfidenceScore(0);
+                setInferenceTime(0);
+                consecutiveMatches.current = 0;
+                lastMatchedIndex.current = -1;
+                predictionHistory.current = [];
+                transitionToState('WAITING_FOR_FACE');
+              }}
+            >
+              <Text style={[styles.buttonText, { color: '#000000' }]}>Restart Scan</Text>
+            </TouchableOpacity>
           ) : (
             <View style={styles.statusBox}>
-              {livenessState !== 'LIVENESS_PASSED' && livenessState !== 'LIVENESS_FAILED' && (
+              {((livenessState !== 'LIVENESS_PASSED' || (!recognizedName && !enrollmentSuccess))) && (
                 <ActivityIndicator size="small" color={getFrameColor()} style={styles.loader} />
               )}
               <Text style={[styles.statusText, { color: getFrameColor() }]}>
@@ -434,10 +756,25 @@ export const CameraScreen: React.FC = () => {
             <Text style={styles.telemetryLine}>State: <Text style={[styles.telemetryValue, { color: getFrameColor() }]}>{livenessState}</Text></Text>
             <Text style={styles.telemetryLine}>FPS: <Text style={styles.telemetryValue}>{fps}</Text></Text>
             <Text style={styles.telemetryLine}>Faces: <Text style={styles.telemetryValue}>{faceCount}</Text></Text>
+            <Text style={styles.telemetryLine}>Contours: <Text style={styles.telemetryValue}>{contourCount}</Text></Text>
             <Text style={styles.telemetryLine}>Yaw: <Text style={styles.telemetryValue}>{liveYaw.toFixed(1)}°</Text></Text>
+            <Text style={styles.telemetryLine}>L/R Eye Open: <Text style={styles.telemetryValue}>{(leftOpenProb * 100).toFixed(0)}% / {(rightOpenProb * 100).toFixed(0)}%</Text></Text>
             <Text style={styles.telemetryLine}>Smoothed EAR: <Text style={styles.telemetryValue}>{liveEar.toFixed(3)}</Text></Text>
-            <Text style={styles.telemetryLine}>Left Eye Prob: <Text style={styles.telemetryValue}>{leftOpenProb.toFixed(3)}</Text></Text>
-            <Text style={styles.telemetryLine}>Right Eye Prob: <Text style={styles.telemetryValue}>{rightOpenProb.toFixed(3)}</Text></Text>
+            
+            {/* TFLite Biometrics telemetry */}
+            {embeddingSource === 'MOCK' && (
+              <Text style={styles.telemetryLine}>Mode: <Text style={[styles.telemetryValue, { color: '#FFCC00' }]}>DEMO MODE</Text></Text>
+            )}
+            <Text style={styles.telemetryLine}>Embedding Source: <Text style={styles.telemetryValue}>{embeddingSource}</Text></Text>
+            <Text style={styles.telemetryLine}>Model Target: <Text style={styles.telemetryValue}>{mode === 'enrollment' ? 'Enrollment Mode' : recognizedName || 'N/A'}</Text></Text>
+            <Text style={styles.telemetryLine}>Inference: <Text style={styles.telemetryValue}>{inferenceTime.toFixed(1)}ms</Text></Text>
+            {mode === 'verification' && (
+              <>
+                <Text style={styles.telemetryLine}>Similarity: <Text style={styles.telemetryValue}>{confidenceScore.toFixed(3)}</Text></Text>
+                <Text style={styles.telemetryLine}>Threshold: <Text style={styles.telemetryValue}>0.800</Text></Text>
+                <Text style={styles.telemetryLine}>Result: <Text style={[styles.telemetryValue, { color: confidenceScore >= 0.80 ? '#00FF66' : '#FF3366' }]}>{confidenceScore >= 0.80 ? 'PASS' : 'FAIL'}</Text></Text>
+              </>
+            )}
           </View>
         )}
       </View>
@@ -516,6 +853,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  closeButton: {
+    position: 'absolute',
+    left: 16,
+    top: 14,
+    padding: 6,
+    zIndex: 10,
+  },
+  closeButtonText: {
+    color: '#FF3366',
+    fontSize: 13,
+    fontWeight: '700',
   },
   headerText: {
     color: '#9BA3B5',

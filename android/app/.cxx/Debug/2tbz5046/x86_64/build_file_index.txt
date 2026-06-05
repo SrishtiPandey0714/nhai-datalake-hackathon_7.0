@@ -1,0 +1,9 @@
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\@op-engineering\op-sqlite\android\build\generated\source\codegen\jni\CMakeLists.txt
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\@react-native-community\netinfo\android\build\generated\source\codegen\jni\CMakeLists.txt
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\react-native-fast-tflite\android\build\generated\source\codegen\jni\CMakeLists.txt
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\react-native-mmkv\android\build\generated\source\codegen\jni\CMakeLists.txt
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\react-native-mmkv\android\CMakeLists.txt
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\react-native-mmkv\MMKV\Core\CMakeLists.txt
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\react-native-safe-area-context\android\src\main\jni\CMakeLists.txt
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\react-native-worklets-core\android\build\generated\source\codegen\jni\CMakeLists.txt
+C:\Hackathons\nhai-datalake-hackathon_7.0\node_modules\react-native\ReactAndroid\cmake-utils\default-app-setup\CMakeLists.txt

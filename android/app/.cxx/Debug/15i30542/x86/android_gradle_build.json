@@ -1,0 +1,105 @@
+{
+  "buildFiles": [
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\@op-engineering\\op-sqlite\\android\\build\\generated\\source\\codegen\\jni\\CMakeLists.txt",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\@react-native-community\\netinfo\\android\\build\\generated\\source\\codegen\\jni\\CMakeLists.txt",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native-fast-tflite\\android\\build\\generated\\source\\codegen\\jni\\CMakeLists.txt",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native-mmkv\\android\\build\\generated\\source\\codegen\\jni\\CMakeLists.txt",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native-mmkv\\android\\CMakeLists.txt",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native-mmkv\\MMKV\\Core\\CMakeLists.txt",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native-safe-area-context\\android\\src\\main\\jni\\CMakeLists.txt",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native-worklets-core\\android\\build\\generated\\source\\codegen\\jni\\CMakeLists.txt",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\node_modules\\react-native\\ReactAndroid\\cmake-utils\\default-app-setup\\CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "C:\\Users\\shash\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+      "-C",
+      "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\android\\app\\.cxx\\Debug\\15i30542\\x86",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "C:\\Users\\shash\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+    "-C",
+    "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\android\\app\\.cxx\\Debug\\15i30542\\x86",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "appmodules::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "appmodules",
+      "output": "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\android\\app\\build\\intermediates\\cxx\\Debug\\15i30542\\obj\\x86\\libappmodules.so",
+      "runtimeFiles": [
+        "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\android\\app\\build\\intermediates\\cxx\\Debug\\15i30542\\obj\\x86\\libreact-native-mmkv.so",
+        "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\android\\app\\build\\intermediates\\cxx\\Debug\\15i30542\\obj\\x86\\libreact_codegen_safeareacontext.so",
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\b7e1445602795066ac1df3ccf77e3c9e\\transformed\\fbjni-0.6.0\\prefab\\modules\\fbjni\\libs\\android.x86\\libfbjni.so",
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\43f4674cac1403748b5c67e32e29c561\\transformed\\react-android-0.76.0-debug\\prefab\\modules\\jsi\\libs\\android.x86\\libjsi.so",
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\43f4674cac1403748b5c67e32e29c561\\transformed\\react-android-0.76.0-debug\\prefab\\modules\\reactnative\\libs\\android.x86\\libreactnative.so"
+      ]
+    },
+    "core::@1b9a7d546b295b7d0867": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "core",
+      "output": "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\android\\app\\.cxx\\Debug\\15i30542\\x86\\RNMmkvSpec_cxxmodule_autolinked_build\\core\\libcore.a"
+    },
+    "react-native-mmkv::@4ae6a1e65d3e68ba0197": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "react-native-mmkv",
+      "output": "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\android\\app\\build\\intermediates\\cxx\\Debug\\15i30542\\obj\\x86\\libreact-native-mmkv.so",
+      "runtimeFiles": [
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\b7e1445602795066ac1df3ccf77e3c9e\\transformed\\fbjni-0.6.0\\prefab\\modules\\fbjni\\libs\\android.x86\\libfbjni.so",
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\43f4674cac1403748b5c67e32e29c561\\transformed\\react-android-0.76.0-debug\\prefab\\modules\\jsi\\libs\\android.x86\\libjsi.so",
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\43f4674cac1403748b5c67e32e29c561\\transformed\\react-android-0.76.0-debug\\prefab\\modules\\reactnative\\libs\\android.x86\\libreactnative.so"
+      ]
+    },
+    "react_codegen_OPSQLiteSpec::@1d2ceb4ab0c4d2e06808": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "react_codegen_OPSQLiteSpec"
+    },
+    "react_codegen_RNCNetInfoSpec::@c36c96bfd5b5770618a5": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "react_codegen_RNCNetInfoSpec"
+    },
+    "react_codegen_RNMmkvSpec::@7541eabbae598da31a69": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "react_codegen_RNMmkvSpec"
+    },
+    "react_codegen_RNTfliteSpec::@296f182f36326455dd18": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "react_codegen_RNTfliteSpec"
+    },
+    "react_codegen_RNWorkletsSpec::@c787b30dd2b0f948dced": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "react_codegen_RNWorkletsSpec"
+    },
+    "react_codegen_safeareacontext::@7984cd80db47aa7b952a": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "react_codegen_safeareacontext",
+      "output": "C:\\Hackathons\\nhai-datalake-hackathon_7.0\\android\\app\\build\\intermediates\\cxx\\Debug\\15i30542\\obj\\x86\\libreact_codegen_safeareacontext.so",
+      "runtimeFiles": [
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\b7e1445602795066ac1df3ccf77e3c9e\\transformed\\fbjni-0.6.0\\prefab\\modules\\fbjni\\libs\\android.x86\\libfbjni.so",
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\43f4674cac1403748b5c67e32e29c561\\transformed\\react-android-0.76.0-debug\\prefab\\modules\\jsi\\libs\\android.x86\\libjsi.so",
+        "C:\\Users\\shash\\.gradle\\caches\\8.10.2\\transforms\\43f4674cac1403748b5c67e32e29c561\\transformed\\react-android-0.76.0-debug\\prefab\\modules\\reactnative\\libs\\android.x86\\libreactnative.so"
+      ]
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "C:\\Users\\shash\\AppData\\Local\\Android\\Sdk\\ndk\\26.1.10909125\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe",
+      "cppCompilerExecutable": "C:\\Users\\shash\\AppData\\Local\\Android\\Sdk\\ndk\\26.1.10909125\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe"
+    }
+  },
+  "cFileExtensions": [],
+  "cppFileExtensions": [
+    "cpp"
+  ]
+}
