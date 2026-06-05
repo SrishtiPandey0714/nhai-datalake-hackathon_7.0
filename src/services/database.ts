@@ -122,10 +122,32 @@ export function getEmployeeById(employeeId: string): Employee | null {
     }
 
     const row = result.rows[0];
-    const rawBlob = row.embedding as Uint8Array;
+    
+    // Log for DB Deserialization Audit
+    const template = row.embedding;
+    console.log("Template Type:", typeof template);
+    console.log("Constructor:", template?.constructor?.name);
+    console.log("Template:", template);
+
+    // Convert to Uint8Array (handling JSI ArrayBuffer return type)
+    let bytes: Uint8Array;
+    if (template instanceof Uint8Array) {
+      bytes = template;
+    } else if (template instanceof ArrayBuffer || (template && template.constructor && template.constructor.name === 'ArrayBuffer')) {
+      bytes = new Uint8Array(template as ArrayBuffer);
+    } else if (Array.isArray(template)) {
+      bytes = Uint8Array.from(template);
+    } else if (template && typeof template === 'object') {
+      bytes = Uint8Array.from(Object.values(template));
+    } else {
+      throw new Error(`Unsupported template representation type: ${typeof template}`);
+    }
+
+    console.log("Recovered Bytes Length:", bytes.length);
 
     // Deserialization maps the raw SQLite BLOB bytes back into a Float32Array
-    const embedding = deserializeEmbedding(rawBlob);
+    const embedding = deserializeEmbedding(bytes);
+    console.log("Embedding Length:", embedding.length);
 
     return {
       employee_id: row.employee_id as string,

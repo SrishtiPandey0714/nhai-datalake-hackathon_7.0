@@ -32,9 +32,10 @@ export function generateEmbedding(
         floatData[i] = frameData[i] / 255.0;
       }
       
-      const outputTensor = model.runSync([floatData]);
-      if (outputTensor && outputTensor.length > 0) {
-        return new Float32Array(outputTensor[0]);
+      const outputs = model.runSync([floatData]);
+      console.log("Raw TFLite Output:", outputs);
+      if (outputs && outputs.length > 0) {
+        return new Float32Array(outputs[0]);
       }
     } catch (err) {
       // Fallback to mock generation if real model execution fails

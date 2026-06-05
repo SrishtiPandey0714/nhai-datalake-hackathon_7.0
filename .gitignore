@@ -2,9 +2,12 @@
 node_modules/
 
 # Gradle/Build outputs
+.gradle/
 android/.gradle/
 android/build/
 android/app/build/
+android/app/.cxx/
+.cxx/
 
 # Android build packages
 *.apk
@@ -16,3 +19,5 @@ android/app/build/
 
 # Local/secrets configurations
 local.properties
+local.properties.local
+

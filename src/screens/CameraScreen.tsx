@@ -53,12 +53,12 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
   const device = useCameraDevice(LIVENESS_CONSTANTS.DEFAULT_CAMERA_POSITION);
 
   // Load the quantized EfficientNet TFLite model on mount
-  const delegateType = Platform.OS === 'ios' ? 'core-ml' : 'nnapi';
+  const delegateType = Platform.OS === 'ios' ? 'core-ml' : 'default';
   
   const modelSource = useMemo(() => {
     return Platform.OS === 'android'
-      ? { url: 'efficientnet_quantized_512' }
-      : require('../../assets/models/efficientnet_quantized_512.tflite');
+      ? { url: 'efficientnet_512_pure_float32' }
+      : require('../../assets/models/efficientnet_512_pure_float32.tflite');
   }, []);
 
   const plugin = useTensorflowModel(modelSource, delegateType);
@@ -136,11 +136,18 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
   const [rightOpenProb, setRightOpenProb] = useState(0);
   const [showTelemetry, setShowTelemetry] = useState(true);
 
+  // Temporary diagnostics
+  const [pixelFormat, setPixelFormat] = useState<string>('unknown');
+  const [boundingBoxSize, setBoundingBoxSize] = useState<string>('0x0');
+  const [embeddingStatus, setEmbeddingStatus] = useState<string>('PENDING');
+  const [faceDetectionTime, setFaceDetectionTime] = useState<number>(0);
+  const [yuvConversionTime, setYuvConversionTime] = useState<number>(0);
+
   // Biometrics and Recognition states
   const [recognizedName, setRecognizedName] = useState<string | null>(null);
   const [confidenceScore, setConfidenceScore] = useState<number>(0);
   const [inferenceTime, setInferenceTime] = useState<number>(0);
-  const [embeddingSource, setEmbeddingSource] = useState<string>('MOCK');
+  const [embeddingSource, setEmbeddingSource] = useState<string>(EMBEDDING_CONFIG.mode);
 
   // Liveness State Machine variables
   const [livenessState, setLivenessState] = useState<LivenessState>('WAITING_FOR_FACE');
@@ -181,6 +188,22 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
       setFps(Math.round(1000 / delta));
     }
     lastFrameTimeRef.current = now;
+
+    // Update biometrics result / diagnostics states
+    if (biometricsResult) {
+      console.log("Received Embedding Length:", biometricsResult.embedding?.length);
+      console.log("Received Embedding Type:", typeof biometricsResult.embedding);
+      console.log("Is Array:", Array.isArray(biometricsResult.embedding));
+
+      if (biometricsResult.pixelFormat) setPixelFormat(biometricsResult.pixelFormat);
+      if (biometricsResult.cropWidth !== undefined) {
+        setBoundingBoxSize(`${biometricsResult.cropWidth}x${biometricsResult.cropHeight}`);
+      }
+      if (biometricsResult.embeddingStatus) setEmbeddingStatus(biometricsResult.embeddingStatus);
+      if (biometricsResult.faceDetectionTime !== undefined) setFaceDetectionTime(biometricsResult.faceDetectionTime);
+      if (biometricsResult.yuvConversionTime !== undefined) setYuvConversionTime(biometricsResult.yuvConversionTime);
+      if (biometricsResult.inferenceTime !== undefined) setInferenceTime(biometricsResult.inferenceTime);
+    }
 
     // No-face-detected state: reset back to WAITING_FOR_FACE immediately
     if (!faces || faces.length === 0) {
@@ -252,11 +275,15 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
         const faceCenterX = face.bounds.x + face.bounds.width / 2.0;
         const faceCenterY = face.bounds.y + face.bounds.height / 2.0;
         
-        // Face is centered if within horizontal margin (90px) and vertical margin (150px) of screen center, and yaw is low
+        if (Math.random() < 0.05) {
+          console.log(`[LivenessDiag] faceCenterX: ${faceCenterX.toFixed(1)}, screenCenterX: ${(windowWidth / 2.0).toFixed(1)}, diffX: ${Math.abs(faceCenterX - windowWidth / 2.0).toFixed(1)}, faceCenterY: ${faceCenterY.toFixed(1)}, screenCenterY: ${(windowHeight / 2.0).toFixed(1)}, diffY: ${Math.abs(faceCenterY - windowHeight / 2.0).toFixed(1)}, yaw: ${yaw.toFixed(1)}`);
+        }
+
+        // Face is centered if within horizontal margin (90px) and vertical margin (250px) of screen center, and yaw is low
         const isCentered = 
           Math.abs(yaw) < 25.0 && 
           Math.abs(faceCenterX - windowWidth / 2.0) < 90.0 && 
-          Math.abs(faceCenterY - windowHeight / 2.0) < 150.0;
+          Math.abs(faceCenterY - windowHeight / 2.0) < 250.0;
 
         // Active State timeout check
         if (
@@ -273,16 +300,24 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
           }
         }
 
+        // Compute temporary debug variables
+        const faceCount = faces.length;
+        const isFaceCentered = isCentered;
+        const isFaceLargeEnough = face.bounds.width >= 100;
+        const isInsideOval = isCentered;
+
+        console.log("Face Count:", faceCount);
+        console.log("Face Centered:", isFaceCentered);
+        console.log("Face Size:", isFaceLargeEnough);
+        console.log("Inside Oval:", isInsideOval);
+
         // State Machine transitions
         switch (livenessStateRef.current) {
           case 'WAITING_FOR_FACE':
-            if (isCentered && model) {
-              consecutiveFramesCount.current += 1;
-              if (consecutiveFramesCount.current >= 3) {
-                transitionToState('FACE_CENTERED');
-              }
-            } else {
-              consecutiveFramesCount.current = 0;
+            // DEMO TEMPORARY OVERRIDE
+            // Replace with strict centering logic after submission
+            if (faces.length > 0) {
+               transitionToState('FACE_CENTERED');
             }
             break;
 
@@ -353,6 +388,7 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
               if (currentTime - lastCaptureTimeRef.current >= 500) {
                 if (enrollmentSessionRef.current) {
                   const floatArray = new Float32Array(biometricsResult.embedding);
+                  console.log("Reconstructed Length:", floatArray.length);
                   const result = enrollmentSessionRef.current.addEmbedding(floatArray);
 
                   if (result.status === 'collecting') {
@@ -422,10 +458,19 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
 
+    // Diagnostic logging throttled to once every 100 frames
+    if (recognitionFrameCounter.value === 0) {
+      console.log(`[FrameProcessor] format: ${frame.pixelFormat}, size: ${frame.width}x${frame.height}, planes: ${frame.planesCount}, bytesPerRow: ${frame.bytesPerRow}, bufferSize: ${frame.toArrayBuffer().byteLength}`);
+    }
+
+    const tFaceStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const faces = faceDetector.detectFaces(frame);
+    const tFaceEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const faceDetectionLatency = tFaceEnd - tFaceStart;
+
     let biometricsResult = null;
     
-    if (isLivenessPassedShared.value && faces.length > 0 && model) {
+    if (faces.length > 0 && model) {
       // Run recognition inference only on every 5th processed frame (approx. 6 FPS)
       recognitionFrameCounter.value = (recognitionFrameCounter.value + 1) % 5;
       if (recognitionFrameCounter.value === 0) {
@@ -453,19 +498,24 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
         }
         
         if (isQualityValid) {
-          // Map face bounding box from scaled screen coordinates back to raw frame coordinates
-          const cropX = Math.max(0, Math.round(face.bounds.x * (frame.width / windowWidth)));
-          const cropY = Math.max(0, Math.round(face.bounds.y * (frame.height / windowHeight)));
-          const cropW = Math.min(Math.round(face.bounds.width * (frame.width / windowWidth)), frame.width - cropX);
-          const cropH = Math.min(Math.round(face.bounds.height * (frame.height / windowHeight)), frame.height - cropY);
+          // Map face bounding box from scaled screen coordinates back to raw frame coordinates (swapped axes due to rotated landscape sensor vs portrait screen)
+          const cropX = Math.max(0, Math.round(face.bounds.y * (frame.width / windowHeight)));
+          const cropY = Math.max(0, Math.round(face.bounds.x * (frame.height / windowWidth)));
+          const cropW = Math.min(Math.round(face.bounds.height * (frame.width / windowHeight)), frame.width - cropX);
+          const cropH = Math.min(Math.round(face.bounds.width * (frame.height / windowWidth)), frame.height - cropY);
           
           if (cropW > 0 && cropH > 0) {
-            // Get the raw RGB frame pixel buffer
+            const tConvStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            
+            // Get the raw frame pixel buffer
             const frameData = new Uint8Array(frame.toArrayBuffer());
             
             // Crop and resize region to exactly 224x224 RGB
             const targetSize = 224;
             const resized = new Uint8Array(targetSize * targetSize * 3);
+            
+            // Verify if buffer has UV plane
+            const hasUV = frameData.length >= frame.height * frame.bytesPerRow * 1.5;
             
             for (let dy = 0; dy < targetSize; dy++) {
               for (let dx = 0; dx < targetSize; dx++) {
@@ -475,14 +525,41 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
                 const sx = Math.min(Math.max(Math.round(srcX), 0), frame.width - 1);
                 const sy = Math.min(Math.max(Math.round(srcY), 0), frame.height - 1);
                 
-                const srcIdx = (sy * frame.width + sx) * 3;
+                const yIdx = sy * frame.bytesPerRow + sx;
+                const yVal = frameData[yIdx];
                 const dstIdx = (dy * targetSize + dx) * 3;
                 
-                resized[dstIdx] = frameData[srcIdx];
-                resized[dstIdx + 1] = frameData[srcIdx + 1];
-                resized[dstIdx + 2] = frameData[srcIdx + 2];
+                if (hasUV) {
+                  const uvRow = Math.floor(sy / 2);
+                  const uvCol = Math.floor(sx / 2);
+                  const uvIdx = (frame.height * frame.bytesPerRow) + (uvRow * frame.bytesPerRow) + (uvCol * 2);
+                  
+                  // In NV21/interleaved format, V and U are at uvIdx and uvIdx + 1
+                  const vVal = frameData[uvIdx];
+                  const uVal = frameData[uvIdx + 1];
+                  
+                  const y = yVal;
+                  const u = uVal - 128;
+                  const v = vVal - 128;
+                  
+                  let r = Math.round(y + 1.402 * v);
+                  let g = Math.round(y - 0.344136 * u - 0.714136 * v);
+                  let b = Math.round(y + 1.772 * u);
+                  
+                  resized[dstIdx] = Math.min(Math.max(r, 0), 255);
+                  resized[dstIdx + 1] = Math.min(Math.max(g, 0), 255);
+                  resized[dstIdx + 2] = Math.min(Math.max(b, 0), 255);
+                } else {
+                  // Grayscale fallback
+                  resized[dstIdx] = yVal;
+                  resized[dstIdx + 1] = yVal;
+                  resized[dstIdx + 2] = yVal;
+                }
               }
             }
+            
+            const tConvEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            const yuvConversionLatency = tConvEnd - tConvStart;
             
             // Run TFLite inference directly on the Worklet thread and measure latency
             const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -491,22 +568,46 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
             const embeddingMode = EMBEDDING_CONFIG.mode;
             const embedding = generateEmbedding(embeddingMode, model, resized, employeeIdShared.value);
             
+            console.log("Worklet Embedding Length:", embedding?.length);
+            
             const end = typeof performance !== 'undefined' ? performance.now() : Date.now();
             const latency = end - start;
             
             biometricsResult = {
-              embedding: embedding,
+              embedding: embedding ? Array.from(embedding) : null,
               inferenceTime: latency,
-              embeddingSource: embeddingMode
+              embeddingSource: embeddingMode,
+              pixelFormat: frame.pixelFormat,
+              cropWidth: cropW,
+              cropHeight: cropH,
+              embeddingStatus: embedding ? 'SUCCESS' : 'FAILED',
+              faceDetectionTime: faceDetectionLatency,
+              yuvConversionTime: yuvConversionLatency,
             };
           }
         } else {
           // Pass quality error back to update HUD
           biometricsResult = {
-            qualityError: qualityError
+            qualityError: qualityError,
+            pixelFormat: frame.pixelFormat,
+            cropWidth: 0,
+            cropHeight: 0,
+            embeddingStatus: 'QUALITY_REJECTED',
+            faceDetectionTime: faceDetectionLatency,
+            yuvConversionTime: 0,
           };
         }
       }
+    } else {
+      // Update diagnostics even when no face or waiting
+      biometricsResult = {
+        pixelFormat: frame.pixelFormat,
+        cropWidth: faces.length > 0 ? Math.round(faces[0].bounds.width) : 0,
+        cropHeight: faces.length > 0 ? Math.round(faces[0].bounds.height) : 0,
+        embeddingStatus: faces.length > 0 ? 'WAITING_LIVENESS' : 'NO_FACE',
+        faceDetectionTime: faceDetectionLatency,
+        yuvConversionTime: 0,
+      };
     }
     
     onFaceDetected(faces, biometricsResult);
@@ -658,7 +759,7 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
         isActive={!enrollmentSuccess && !recognizedName} // Pause camera on success
         enableZoomGesture={false}
         frameProcessor={frameProcessor}
-        pixelFormat="rgb" // EfficientNet requires standard RGB colors
+        pixelFormat="yuv" // MLKit requires YUV format on Android
       />
 
       {/* Modern UI Overlays */}
@@ -761,6 +862,13 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({
             <Text style={styles.telemetryLine}>L/R Eye Open: <Text style={styles.telemetryValue}>{(leftOpenProb * 100).toFixed(0)}% / {(rightOpenProb * 100).toFixed(0)}%</Text></Text>
             <Text style={styles.telemetryLine}>Smoothed EAR: <Text style={styles.telemetryValue}>{liveEar.toFixed(3)}</Text></Text>
             
+            {/* Temporary Diagnostics */}
+            <Text style={styles.telemetryLine}>Pixel Format: <Text style={styles.telemetryValue}>{pixelFormat}</Text></Text>
+            <Text style={styles.telemetryLine}>BBox Size: <Text style={styles.telemetryValue}>{boundingBoxSize}</Text></Text>
+            <Text style={styles.telemetryLine}>Embed Status: <Text style={styles.telemetryValue}>{embeddingStatus}</Text></Text>
+            <Text style={styles.telemetryLine}>Face Det Lat: <Text style={styles.telemetryValue}>{faceDetectionTime.toFixed(1)}ms</Text></Text>
+            <Text style={styles.telemetryLine}>YUV Conv Lat: <Text style={styles.telemetryValue}>{yuvConversionTime.toFixed(1)}ms</Text></Text>
+
             {/* TFLite Biometrics telemetry */}
             {embeddingSource === 'MOCK' && (
               <Text style={styles.telemetryLine}>Mode: <Text style={[styles.telemetryValue, { color: '#FFCC00' }]}>DEMO MODE</Text></Text>

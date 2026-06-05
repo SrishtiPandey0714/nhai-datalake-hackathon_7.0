@@ -16,7 +16,7 @@ export interface EnrollmentSessionResult {
 }
 
 const REQUIRED_EMBEDDINGS_COUNT = 5;
-const DIVERSITY_SIMILARITY_THRESHOLD = 0.99; // If cosine similarity is higher than this, frames are too identical (static face)
+const DIVERSITY_SIMILARITY_THRESHOLD = 0.995; // If cosine similarity is higher than this, frames are too identical (static face)
 
 export class EnrollmentSession {
   private employeeId: string;
@@ -81,6 +81,12 @@ export class EnrollmentSession {
    * Performs length validation, embedding space diversity check, and saves to database on completion.
    */
   addEmbedding(embedding: Float32Array): EnrollmentSessionResult {
+    console.log("Embedding Type:", typeof embedding);
+    console.log("Constructor:", embedding?.constructor?.name);
+    console.log("Is Array:", Array.isArray(embedding));
+    console.log("Length:", embedding?.length);
+    console.log("Embedding:", embedding);
+
     // 1. Validation: Validate length is exactly 512 dimensions
     if (!validateEmbedding(embedding)) {
       return {
@@ -101,6 +107,10 @@ export class EnrollmentSession {
     if (this.embeddings.length > 0) {
       const lastEmbedding = this.embeddings[this.embeddings.length - 1];
       const similarity = calculateCosineSimilarity(embedding, lastEmbedding);
+
+      console.log("Similarity Value:", similarity);
+      console.log("Threshold Value:", DIVERSITY_SIMILARITY_THRESHOLD);
+      console.log("Capture Number:", this.embeddings.length + 1);
 
       if (similarity > DIVERSITY_SIMILARITY_THRESHOLD) {
         return {
